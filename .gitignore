@@ -1,0 +1,10 @@
+data/
+*.pth
+*.pt
+wandb/
+.venv/
+__pycache__/
+
+checkpoints/
+
+checkpoints/
