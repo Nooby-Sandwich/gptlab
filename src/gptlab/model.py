@@ -91,6 +91,24 @@ class FusedAttention(nn.Module):
         return self.dropout(self.proj(out))
 
 
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
+
+
+def make_norm(cfg: ModelConfig):
+    if cfg.norm == "rmsnorm":
+        return RMSNorm(cfg.n_embd)
+    if cfg.norm == "layernorm":
+        return nn.LayerNorm(cfg.n_embd)
+    raise ValueError(f"Unknown norm: {cfg.norm!r}")
+    
+
 class Block(nn.Module):
     """Transformer block: communication (attention) then computation (MLP)."""
 
@@ -99,8 +117,10 @@ class Block(nn.Module):
         #self.sa = MultiHeadAttention(cfg)
         self.sa = FusedAttention(cfg) if cfg.attn == "sdpa" else MultiHeadAttention(cfg)
         self.ffwd = FeedForward(cfg)
-        self.ln1 = nn.LayerNorm(cfg.n_embd)
-        self.ln2 = nn.LayerNorm(cfg.n_embd)
+        # self.ln1 = nn.LayerNorm(cfg.n_embd)
+        # self.ln2 = nn.LayerNorm(cfg.n_embd)
+        self.ln1 = make_norm(cfg)
+        self.ln2 = make_norm(cfg)
 
     def forward(self, x):
         x = x + self.sa(self.ln1(x))
@@ -115,7 +135,8 @@ class GPT(nn.Module):
         self.token_embedding_table = nn.Embedding(cfg.vocab_size, cfg.n_embd)
         self.position_embedding_table = nn.Embedding(cfg.block_size, cfg.n_embd)
         self.blocks = nn.Sequential(*[Block(cfg) for _ in range(cfg.n_layer)])
-        self.ln_f = nn.LayerNorm(cfg.n_embd)
+        #self.ln_f = nn.LayerNorm(cfg.n_embd)
+        self.ln_f = make_norm(cfg)
         self.lm_head = nn.Linear(cfg.n_embd, cfg.vocab_size)
 
     def forward(self, idx, targets=None):
