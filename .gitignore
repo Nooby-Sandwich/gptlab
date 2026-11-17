@@ -5,6 +5,12 @@ wandb/
 .venv/
 __pycache__/
 
-checkpoints/
-
-checkpoints/
+checkpoints/*
+!checkpoints/baseline.pt
+!checkpoints/baseline_log.csv
+!checkpoints/rmsnorm.pt
+!checkpoints/rmsnorm_log.csv
+!checkpoints/sdpa.pt
+!checkpoints/sdpa_log.csv
+!checkpoints/swiglu_reg.pt
+!checkpoints/swiglu_reg_log.csv
