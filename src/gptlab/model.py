@@ -69,6 +69,27 @@ class FeedForward(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+# add SwiGLU
+class SwiGLU(nn.Module):
+    def __init__(self, cfg: ModelConfig):
+        super().__init__()
+        hidden = int(2 * 4 * cfg.n_embd /3) # 1024 when n_embed = 384
+        self.w1 = nn.Linear(cfg.n_embd, hidden, bias=False)  # gate branch
+        self.w2 = nn.Linear(cfg.n_embd, hidden, bias=False)  # value branch
+        self.w3 = nn.Linear(hidden, cfg.n_embd, bias=False)  # back down
+        self.dropout = nn.Dropout(cfg.dropout)
+
+    def forward(self, x):
+        return self.dropout(self.w3(F.silu(self.w1(x)) * self.w2(x)))
+
+def make_mlp(cfg: ModelConfig):
+    if cfg.mlp == "relu":
+        return FeedForward(cfg)
+    if cfg.mlp == "swiglu":
+        return SwiGLU(cfg)
+    raise ValueError(f"Unknown mlp: {cfg.mlp!r}")
+
+
 class FusedAttention(nn.Module):
     """All heads at once, using Pytorch's fused fused attention kernel."""
 
@@ -116,7 +137,8 @@ class Block(nn.Module):
         super().__init__()
         #self.sa = MultiHeadAttention(cfg)
         self.sa = FusedAttention(cfg) if cfg.attn == "sdpa" else MultiHeadAttention(cfg)
-        self.ffwd = FeedForward(cfg)
+        #self.ffwd = FeedForward(cfg)
+        self.ffwd = make_mlp(cfg)
         # self.ln1 = nn.LayerNorm(cfg.n_embd)
         # self.ln2 = nn.LayerNorm(cfg.n_embd)
         self.ln1 = make_norm(cfg)

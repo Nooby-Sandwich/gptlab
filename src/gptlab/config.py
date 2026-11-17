@@ -19,7 +19,7 @@ class ModelConfig:
     # norm: str = "rsmnorm"    # normalisation
     attn: str = "manual"
     norm: str = "layernorm"
-
+    mlp: str = "relu"          # multi layer perceptron 
 
 @dataclass
 class TrainConfig:
