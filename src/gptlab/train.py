@@ -10,7 +10,7 @@ import csv
 import time
 from dataclasses import asdict, fields
 from pathlib import Path
-
+import math
 import torch
 
 from gptlab.config import ModelConfig, TrainConfig
@@ -48,6 +48,20 @@ def sync(device):
         torch.cuda.synchronize()
 
 
+def get_lr(step, tcfg):
+    # 1. Linear warmup
+    if step < tcfg.warmup_iters:
+        return tcfg.learning_rate * (step + 1) / tcfg.warmup_iters
+    # 2. If past max_iters, stop decaying (safety)
+    if step > tcfg.max_iters:
+        return tcfg.learning_rate * 0.1
+    # 3. Cosine decay
+    decay_ratio = (step - tcfg.warmup_iters) / (tcfg.max_iters - tcfg.warmup_iters)
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    min_lr = tcfg.learning_rate * 0.1
+    return min_lr + coeff * (tcfg.learning_rate - min_lr)
+
+
 def main():
     args = parse_args()
     tcfg = TrainConfig(**{f.name: getattr(args, f.name) for f in fields(TrainConfig)})
@@ -65,7 +79,15 @@ def main():
 
     model = GPT(mcfg).to(device)
     print(f"Parameters: {model.num_params() / 1e6:.2f}M")
-    optimizer = torch.optim.AdamW(model.parameters(), lr=tcfg.learning_rate)
+    #optimizer = torch.optim.AdamW(model.parameters(), lr=tcfg.learning_rate)
+    # new optimizer with added weight_decay
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr = tcfg.learning_rate,
+        weight_decay=tcfg.weight_decay
+    )
+
+
 
     out_dir = Path(tcfg.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -108,14 +130,27 @@ def main():
         if it == tcfg.max_iters:
             break
 
+        # Update the learning rate 
+        lr = get_lr(it, tcfg)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+
         x, y = get_batch(train_data, tcfg.batch_size, mcfg.block_size, device)
-        _, loss = model(x, y)
+        #_, loss = model(x, y)
+        
+        # NEW: Wrap the forward pass in autocast for bf16
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            _, loss = model(x, y)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
 
     log_file.close()
     print(f"Best val loss {best_val:.4f}. Checkpoint: {ckpt_path}")
+
+    # Load the best checkpoint, not the overfit final one
+    checkpoint = torch.load(ckpt_path, map_location=device)
+    model.load_state_dict(checkpoint["model"])
 
     # Quick sample from the final model
     model.eval()

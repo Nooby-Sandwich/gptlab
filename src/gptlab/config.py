@@ -32,3 +32,5 @@ class TrainConfig:
     eval_iters: int = 200
     learning_rate: float = 3e-4
     seed: int = 1337
+    weight_decay: float = 0.1  # Penalize large weights
+    warmup_iters: int = 200    # Linear warmup steps
