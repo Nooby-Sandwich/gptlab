@@ -15,6 +15,7 @@ class ModelConfig:
     n_layer: int = 6         # number of transformer blocks
     n_head: int = 6          # attention heads per block
     dropout: float = 0.2
+    attn: str = "sdpa"     # 
 
 
 @dataclass

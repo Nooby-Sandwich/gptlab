@@ -69,13 +69,35 @@ class FeedForward(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+class FusedAttention(nn.Module):
+    """All heads at once, using Pytorch's fused fused attention kernel."""
+
+    def __init__(self, cfg: ModelConfig):
+        super().__init__()
+        self.n_head = cfg.n_head
+        self.qkv = nn.Linear(cfg.n_embd, 3 * cfg.n_embd, bias=False)
+        self.proj = nn.Linear(cfg.n_embd, cfg.n_embd)
+        self.dropout = nn.Dropout(cfg.dropout)
+
+    def forward(self, x):
+        B, T, C = x.shape
+        q, k, v = self.qkv(x).split(C, dim=2)
+        hs = C // self.n_head
+        q = q.view(B, T, self.n_head, hs).transpose(1, 2)  # (B, heads, T, hs)
+        k = k.view(B, T, self.n_head, hs).transpose(1, 2)
+        v = v.view(B, T, self.n_head, hs).transpose(1, 2)
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        out = out.transpose(1, 2).contiguous().view(B, T, C)
+        return self.dropout(self.proj(out))
+
 
 class Block(nn.Module):
     """Transformer block: communication (attention) then computation (MLP)."""
 
     def __init__(self, cfg: ModelConfig):
         super().__init__()
-        self.sa = MultiHeadAttention(cfg)
+        #self.sa = MultiHeadAttention(cfg)
+        self.sa = FusedAttention(cfg) if cfg.attn == "sdpa" else MultiHeadAttention(cfg)
         self.ffwd = FeedForward(cfg)
         self.ln1 = nn.LayerNorm(cfg.n_embd)
         self.ln2 = nn.LayerNorm(cfg.n_embd)
