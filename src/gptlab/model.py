@@ -125,23 +125,48 @@ class FusedAttention(nn.Module):
             self.register_buffer("rope_sin", sin, persistent=False)
                         
 
+    def _project(self, x, start_pos):
+        """q, k, v as (B, heads, T, head_dim); RoPE uses absolute positions from start_pos."""
+        B, T, C = x.shape
+        hs = C // self.n_head
+        q, k, v = self.qkv(x).split(C, dim = 2)
+        q = q.view(B, T, self.n_head, hs).transpose(1, 2)
+        k = k.view(B, T, self.n_head, hs).transpose(1, 2)
+        v = v.view(B, T, self.n_head, hs).transpose(1, 2)
+        if self.use_rope:      # rotate queries and keys
+            cos = self.rope_cos[start_pos : start_pos + T]
+            sin = self.rope_sin[start_pos : start_pos + T]
+            q, k = apply_rope(q, cos, sin), apply_rope(k, cos, sin)
+        return q, k, v
 
     def forward(self, x):
         B, T, C = x.shape
-        q, k, v = self.qkv(x).split(C, dim=2)
-        hs = C // self.n_head
-        q = q.view(B, T, self.n_head, hs).transpose(1, 2)  # (B, heads, T, hs)
-        k = k.view(B, T, self.n_head, hs).transpose(1, 2)
-        v = v.view(B, T, self.n_head, hs).transpose(1, 2)
+        #q, k, v = self.qkv(x).split(C, dim=2)
+        q, k, v = self._project(x, 0)
         # rotate queries and keys only, never values
-        if self.use_rope:
-            q = apply_rope(q, self.rope_cos[:T], self.rope_sin[:T])
-            k = apply_rope(k, self.rope_cos[:T], self.rope_sin[:T])
+        # if self.use_rope:
+        #     q = apply_rope(q, self.rope_cos[:T], self.rope_sin[:T])
+        #     k = apply_rope(k, self.rope_cos[:T], self.rope_sin[:T])
                 
         out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         out = out.transpose(1, 2).contiguous().view(B, T, C)
         return self.dropout(self.proj(out))
 
+    def forward_cached(self, x, past):
+        """x: new tokens (B, T_new, C); past: (k, v) of earlier tokens or None."""
+        B, T, C = x.shape
+        assert past is None or T == 1, "after the prefill, feed one token at a time"
+        start = 0 if past is None else past[0].size(2)
+        q,k,v = self._project(x, start)
+        if past is not None:
+            k = torch.cat((past[0], k), dim=2)
+            v = torch.cat((past[1], v), dim=2)
+
+        # prefill needs the causal mask; a single new token may attend to everything cached
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=past is None)
+        out = out.transpose(1, 2).contiguous().view(B, T, C)
+        return self.dropout(self.proj(out)), (k, v)
+        
 
 class RMSNorm(nn.Module):
     def __init__(self, dim, eps=1e-6):
@@ -179,6 +204,13 @@ class Block(nn.Module):
         x = x + self.sa(self.ln1(x))
         x = x + self.ffwd(self.ln2(x))
         return x
+
+    def forward_cached(self, x, past):
+        a, present = self.sa.forward_cached(self.ln1(x), past)
+        x = x + a
+        x = x + self.ffwd(self.ln2(x))
+        return x, present
+
 
 
 class GPT(nn.Module):
@@ -232,19 +264,61 @@ class GPT(nn.Module):
             )
         return logits, loss
 
+    def forward_cached(self, idx, past=None):
+        """Process new tokens idx (B, T_new), given each layer's cached (k, v) in `past`."""
+        B, T = idx.shape
+        start = 0 if past is None else past[0][0].size(2)
+        assert start + T <= self.cfg.block_size, "cache is full"
+        x = self.token_embedding_table(idx)
+        if self.cfg.pos == "learned":
+            x = x + self.position_embedding_table(torch.arange(start, start + T, device=idx.device))
+        presents = []
+        for i, block in enumerate(self.blocks):
+            x, present = block.forward_cached(x, None if past is None else past[i])
+            presents.append(present)
+        return self.lm_head(self.ln_f(x)), presents
+
+    def _sample(self, logits, temperature, top_k):
+        logits = logits[:, -1, :] / max(temperature, 1e-8)
+        if top_k is not None:
+            v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+            logits[logits < v[:, [-1]]] = float("-inf")
+        return torch.multinomial(F.softmax(logits, dim=-1), num_samples=1)
+
+    # @torch.no_grad()
+    # def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    #     """Autoregressively extend idx (B, T). Call model.eval() first."""
+    #     for _ in range(max_new_tokens):
+    #         idx_cond = idx[:, -self.cfg.block_size :]
+    #         logits, _ = self(idx_cond)
+    #         logits = logits[:, -1, :] / max(temperature, 1e-8)
+    #         if top_k is not None:
+    #             v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+    #             logits[logits < v[:, [-1]]] = float("-inf")
+    #         probs = F.softmax(logits, dim=-1)
+    #         idx_next = torch.multinomial(probs, num_samples=1)
+    #         idx = torch.cat((idx, idx_next), dim=1)
+    #     return idx
+
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, use_cache=True):
         """Autoregressively extend idx (B, T). Call model.eval() first."""
+        block = self.cfg.block_size
+        use_cache = use_cache and self.cfg.attn == "sdpa"  # manual attention has no cache path
+        past = None
         for _ in range(max_new_tokens):
-            idx_cond = idx[:, -self.cfg.block_size :]
-            logits, _ = self(idx_cond)
-            logits = logits[:, -1, :] / max(temperature, 1e-8)
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = float("-inf")
-            probs = F.softmax(logits, dim=-1)
-            idx_next = torch.multinomial(probs, num_samples=1)
-            idx = torch.cat((idx, idx_next), dim=1)
+            if not use_cache:
+                logits, _ = self(idx[:, -block:])
+            else:
+                if past is not None and past[0][0].size(2) >= block:
+                    past = None                      # window full: rebuild from the newest half
+                    inp = idx[:, -(block // 2):]
+                elif past is None:
+                    inp = idx[:, -block:]            # prefill with the prompt
+                else:
+                    inp = idx[:, -1:]                # just the newest token
+                logits, past = self.forward_cached(inp, past)
+            idx = torch.cat((idx, self._sample(logits, temperature, top_k)), dim=1)
         return idx
 
     def num_params(self):
