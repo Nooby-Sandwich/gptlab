@@ -90,6 +90,24 @@ def make_mlp(cfg: ModelConfig):
     raise ValueError(f"Unknown mlp: {cfg.mlp!r}")
 
 
+# RoPE Cache 
+def rope_cache(head_dim, max_len, base=10000.0):
+    """Rotation angles for every (position, frequency pair)."""
+    inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
+    angles = torch.outer(torch.arange(max_len).float(), inv_freq)   # (max_len, head_dim/2)
+    return angles.cos(), angles.sin()
+
+
+# apply RoPE
+def apply_rope(x, cos, sin):
+    """Rotate each consecutive pair of dims of x (B, heads, T, head_dim) by its position's angle."""
+    x1, x2 = x[..., 0::2], x[..., 1::2]
+    out = torch.stack((x1 * cos - x2 * sin, x1 * sin + x2 * cos), dim=-1).flatten(-2)
+    return out.type_as(x)
+
+
+
+
 class FusedAttention(nn.Module):
     """All heads at once, using Pytorch's fused fused attention kernel."""
 
@@ -99,6 +117,14 @@ class FusedAttention(nn.Module):
         self.qkv = nn.Linear(cfg.n_embd, 3 * cfg.n_embd, bias=False)
         self.proj = nn.Linear(cfg.n_embd, cfg.n_embd)
         self.dropout = nn.Dropout(cfg.dropout)
+        # add RoPE
+        self.use_rope = cfg.pos == "rope"
+        if self.use_rope:
+            cos, sin = rope_cache(cfg.n_embd // cfg.n_head, cfg.block_size)
+            self.register_buffer("rope_cos", cos, persistent=False)
+            self.register_buffer("rope_sin", sin, persistent=False)
+                        
+
 
     def forward(self, x):
         B, T, C = x.shape
@@ -107,6 +133,11 @@ class FusedAttention(nn.Module):
         q = q.view(B, T, self.n_head, hs).transpose(1, 2)  # (B, heads, T, hs)
         k = k.view(B, T, self.n_head, hs).transpose(1, 2)
         v = v.view(B, T, self.n_head, hs).transpose(1, 2)
+        # rotate queries and keys only, never values
+        if self.use_rope:
+            q = apply_rope(q, self.rope_cos[:T], self.rope_sin[:T])
+            k = apply_rope(k, self.rope_cos[:T], self.rope_sin[:T])
+                
         out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         out = out.transpose(1, 2).contiguous().view(B, T, C)
         return self.dropout(self.proj(out))
@@ -151,20 +182,45 @@ class Block(nn.Module):
 
 
 class GPT(nn.Module):
+    # def __init__(self, cfg: ModelConfig):
+    #     super().__init__()
+    #     self.cfg = cfg
+    #     self.token_embedding_table = nn.Embedding(cfg.vocab_size, cfg.n_embd)
+    #     self.position_embedding_table = nn.Embedding(cfg.block_size, cfg.n_embd)
+    #     self.blocks = nn.Sequential(*[Block(cfg) for _ in range(cfg.n_layer)])
+    #     #self.ln_f = nn.LayerNorm(cfg.n_embd)
+    #     self.ln_f = make_norm(cfg)
+    #     self.lm_head = nn.Linear(cfg.n_embd, cfg.vocab_size)
+
     def __init__(self, cfg: ModelConfig):
         super().__init__()
+        if cfg.attn not in ("manual", "sdpa"):
+            raise ValueError(f"Unknown attn: {cfg.attn!r}")
+        if cfg.pos not in ("learned", "rope"):
+            raise ValueError(f"Unknown pos: {cfg.pos!r}")
+        if cfg.pos == "rope" and cfg.attn != "sdpa":
+            raise ValueError("--pos rope needs --attn sdpa")
         self.cfg = cfg
         self.token_embedding_table = nn.Embedding(cfg.vocab_size, cfg.n_embd)
-        self.position_embedding_table = nn.Embedding(cfg.block_size, cfg.n_embd)
+        if cfg.pos == "learned":
+            self.position_embedding_table = nn.Embedding(cfg.block_size, cfg.n_embd)
+
         self.blocks = nn.Sequential(*[Block(cfg) for _ in range(cfg.n_layer)])
-        #self.ln_f = nn.LayerNorm(cfg.n_embd)
         self.ln_f = make_norm(cfg)
         self.lm_head = nn.Linear(cfg.n_embd, cfg.vocab_size)
+        
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
-        pos_emb = self.position_embedding_table(torch.arange(T, device=idx.device))
-        x = self.token_embedding_table(idx) + pos_emb  # (B, T, C)
+        # pos_emb = self.position_embedding_table(torch.arange(T, device=idx.device))
+        # x = self.token_embedding_table(idx) + pos_emb  # (B, T, C)
+
+        x = self.token_embedding_table(idx)  # (B, T, C)
+
+        if self.cfg.pos == "learned":
+            pos_emb = self.position_embedding_table(torch.arange(T, device=idx.device))
+            x = x + pos_emb
+
         x = self.blocks(x)
         x = self.ln_f(x)
         logits = self.lm_head(x)  # (B, T, vocab_size)

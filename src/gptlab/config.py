@@ -19,7 +19,8 @@ class ModelConfig:
     # norm: str = "rsmnorm"    # normalisation
     attn: str = "manual"
     norm: str = "layernorm"
-    mlp: str = "relu"          # multi layer perceptron 
+    mlp: str = "relu"          # multi layer perceptron
+    pos: str = "learned"     # "learned" or "rope" 
 
 @dataclass
 class TrainConfig:
@@ -34,3 +35,4 @@ class TrainConfig:
     seed: int = 1337
     weight_decay: float = 0.1  # Penalize large weights
     warmup_iters: int = 200    # Linear warmup steps
+    val_path: str = ""   # if set, use this file for validation instead of a 90/10 split

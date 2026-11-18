@@ -73,7 +73,8 @@ def main():
     print(f"Device: {device}"
           + (f" ({torch.cuda.get_device_name(0)})" if device == "cuda" else ""))
 
-    tokenizer, train_data, val_data = load_data(tcfg.data_path)
+    #tokenizer, train_data, val_data = load_data(tcfg.data_path)
+    tokenizer, train_data, val_data = load_data(tcfg.data_path, tcfg.val_path)
     mcfg.vocab_size = tokenizer.vocab_size
     print(f"Data: {len(train_data) + len(val_data):,} chars, vocab {mcfg.vocab_size}")
 
