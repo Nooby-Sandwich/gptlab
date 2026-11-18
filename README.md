@@ -81,7 +81,7 @@ The first four runs used a plain setup: AdamW with default weight decay (0.01), 
 - weight decay 0.1
 - bf16 autocast for the training forward pass
 
-These three changes were made together, so the improvement from `swiglu` to `swiglu_reg` is **not attributed to any one of them**. The current `train.py` always uses the new recipe, so the first four rows can only be reproduced from earlier commits (`git log`).
+These three changes were made together, so the improvement from `swiglu` to `swiglu_reg` is **not attributed to any one of them**. The current `train.py` always uses the new recipe, so the first four runs can only be reproduced from earlier commits (`git log`).
 
 ## Setup
 
@@ -144,7 +144,7 @@ Training logs are written to `checkpoints/<run_name>_log.csv` (git-ignored); the
 
 From `swiglu_reg` at its best checkpoint, with no prompt:
 
-> tinctively been accumulated from each other in a comparative part of the organisation. It should be double to beconsidered as distinct à lie 301 dominant result gnawson "Virge that such generalis can cannot be, included keepingde by man certain species...
+> tinctively been accumulated from each other in a comparative part of the organisation. It should be double to beconsidered as distinct à lie 301 dominant result gnawson "Virge that such generalis cannot be, included keepingde by man certain species... 
 
 The model has learned Darwin's vocabulary, punctuation and sentence rhythm, but it is a 10.8M-parameter character model trained on one book. The text reads like Darwin and says nothing true.
 
@@ -152,21 +152,48 @@ The model has learned Darwin's vocabulary, punctuation and sentence rhythm, but 
 
 ```
 gptlab/
-├── pyproject.toml, uv.lock
+├── .gitignore
+├── .python-version
+├── pyproject.toml
+├── uv.lock
+├── README.md
+├── checkpoints/
+│   ├── baseline.pt
+│   ├── baseline_log.csv
+│   ├── rmsnorm.pt
+│   ├── rmsnorm_log.csv
+│   ├── sdpa.pt
+│   ├── sdpa_log.csv
+│   ├── swiglu_reg.pt
+│   └── swiglu_reg_log.csv
+├── results/
+│   ├── baseline_log.csv
+│   ├── rmsnorm_log.csv
+│   ├── rope_reg_log.csv
+│   ├── sdpa_log.csv
+│   ├── swiglu_log.csv
+│   ├── swiglu_reg_log.csv
+│   └── val_loss.png
 ├── src/gptlab/
-│   ├── config.py          # ModelConfig / TrainConfig dataclasses (every field is a CLI flag)
-│   ├── tokenizer.py       # character-level tokenizer
-│   ├── data.py            # dataset loading and batch sampling
-│   ├── model.py           # GPT with switchable attention / norm / MLP / positions, KV cache
-│   ├── train.py           # training loop, logging, checkpointing
-│   ├── generate.py        # sampling from a checkpoint
-│   ├── bench_generate.py  # KV-cache benchmark
-│   ├── plot_results.py    # loss-curve plot
-│   ├── prepare_data.py    # Gutenberg text -> data/input.txt
-│   └── prepare_multi.py   # multi-book dataset builder (not used for the results above)
-├── tests/
-└── results/               # run logs (CSV) and the loss plot
+│   ├── __init__.py         # package entry point / hello-world main
+│   ├── config.py           # ModelConfig / TrainConfig dataclasses (every field is a CLI flag)
+│   ├── tokenizer.py        # character-level tokenizer
+│   ├── data.py             # dataset loading and batch sampling
+│   ├── model.py            # GPT with switchable attention / norm / MLP / positions, KV cache
+│   ├── train.py            # training loop, logging, checkpointing
+│   ├── generate.py         # sampling from a checkpoint
+│   ├── evals.py            # BPC, memorization and prompt-completion evaluations
+│   ├── bench_generate.py   # KV-cache benchmark
+│   ├── plot_results.py     # loss-curve plot
+│   ├── prepare_data.py     # Gutenberg text -> data/input.txt
+│   └── prepare_multi.py    # multi-book dataset builder (not used for the results above)
+└── tests/
+    ├── test_kv_cache.py
+    ├── test_mlp.py
+    ├── test_norm.py
+    └── test_rope.py
 ```
+
 ## Limitations
 
 - **Single seed per run.** Differences under about 0.01 validation loss are within noise.
