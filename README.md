@@ -4,6 +4,8 @@ A small GPT language model written from scratch in PyTorch and trained on Charle
 
 The point of the project is the **experiment log**: every upgrade is a switchable flag, every run writes a CSV log, and the results below include the cases where an upgrade did *not* help.
 
+**Status:** finished as a learning project. See [Limitations](#limitations) for what the numbers can and cannot support, and [Possible extensions](#possible-extensions) for what was left undone.
+
 ![Validation loss by run](results/val_loss.png)
 
 *Dashed = original training recipe, solid = improved recipe (see [Training recipe](#training-recipe)).*
@@ -23,20 +25,7 @@ Dataset: *Origin of Species*, 6th edition (1,185,083 characters, vocabulary of 9
 
 Rows are cumulative: each run adds one change to the row above it (`rope_reg` is compared against `swiglu_reg`, since both use the improved recipe). Run-to-run noise is roughly ±0.004 in validation loss, estimated from step-to-step fluctuation within a run, so differences smaller than about 0.01 should be read as ties.
 
-## Evaluations
-
-A model without evaluations is a black box. We run a custom evaluation suite (`uv run python -m gptlab.evals`) to measure both statistical performance and behavioral characteristics.
-
-**1. Bits Per Character (BPC)**
-The standard metric for character-level models. `swiglu_reg` achieves **1.15 BPC**. For context, random guessing across a 98-character vocabulary is ~6.6 BPC, and standard file compression (like `.zip`) is ~2.5 BPC. A score of 1.15 indicates the model has learned the deep statistical structure of English and Darwin's specific vocabulary.
-
-**2. Memorization Rate (Overfitting Check)**
-Because the dataset is small (1.2M chars), we tested whether the model just memorizes the book. The eval suite generates 10 random 200-character samples and uses `difflib` to search for exact 20+ character substring matches within the training data. The model showed a **0.0% exact memorization rate**. The model's overfitting manifests as stylistic mimicry (learning Darwin's sentence structure) rather than verbatim regurgitation.
-
-**3. Prompt Completion**
-The model successfully synthesizes novel text in the style of the author. Example generations:
-*   *Prompt: "Natural selection"* → *"Natural selection, and is almost invariably successively different from each other, and it is impossible; but it seem..."*
-*   *Prompt: "The giraffe"* → *"The giraffe, and by Mr. Croll’s observer of the Development of F. sanguinea has sufficed so frequently perfect..."* 
+Bits/char is the **validation** loss (in nats) divided by ln 2, taken at the best checkpoint.
 
 ### Other measurements
 
@@ -54,6 +43,17 @@ The model successfully synthesizes novel text in the style of the author. Exampl
 - **Training recipe:** removes the overfitting and gives the best result (best 1.0037, and the final step is almost as good at 1.0064).
 - **RoPE:** the fastest early learner (val 1.033 at step 1500) but the worst overfitter, and it finished behind SwiGLU with learned positions (1.0257 vs 1.0037). The 1.2M-character dataset is the bottleneck: every configuration bottoms out near 1.00 to 1.03, so architecture changes mostly change *how fast* the model reaches that floor. RoPE's main advantages (position generalization, longer contexts) are not tested by a fixed 256-character window.
 - **KV cache:** correct (tested against the full forward pass), 3.4× faster on CPU, but no gain on GPU. At batch size 1 a 10M-parameter model is limited by per-step kernel-launch overhead, not arithmetic.
+
+## Evaluations
+
+**Bits per character.** On the held-out 10% of the book, `swiglu_reg` reaches a validation loss of 1.0037 nats/char at its best checkpoint, which is **1.448 bits/char** (1.452 at step 5000). For scale, guessing uniformly over the 98-character vocabulary would cost log2(98) ≈ 6.6 bits/char. This is one small, single-book dataset, so the number should not be compared with published BPC figures on other corpora. Stronger reference points (a character-frequency baseline, gzip on the same text) have not been computed yet.
+
+**Overfitting, qualitatively.** The unregularized `swiglu` run ends with train loss 0.57 against validation loss 1.095; with the improved recipe (`swiglu_reg`) the gap at step 5000 is 0.80 against 1.006. The sample printed at the end of the unregularized run was garbled chapter-heading text imitating the book's table of contents, while text from `swiglu_reg` reads as ordinary prose. A quantitative verbatim-memorization check is not reported yet.
+
+**Example completions.** Sampled from `swiglu_reg`. They pick up Darwin's vocabulary and phrasing but are neither coherent nor factual.
+
+- Prompt `Natural selection` → *"Natural selection, and is almost invariably successively different from each other, and it is impossible; but it seem..."*
+- Prompt `The giraffe` → *"The giraffe, and by Mr. Croll’s observer of the Development of F. sanguinea has sufficed so frequently perfect..."*
 
 ## What's implemented
 
@@ -82,6 +82,8 @@ The first four runs used a plain setup: AdamW with default weight decay (0.01), 
 - bf16 autocast for the training forward pass
 
 These three changes were made together, so the improvement from `swiglu` to `swiglu_reg` is **not attributed to any one of them**. The current `train.py` always uses the new recipe, so the first four runs can only be reproduced from earlier commits (`git log`).
+
+Logged throughput also more than doubled with the new recipe (about 26k tokens/s for `swiglu` against about 69k for `swiglu_reg`, time-averaged), which is consistent with bf16. Because the GPU throttled and its thermal state differed between runs, this is not reported as a measured speedup.
 
 ## Setup
 
@@ -144,11 +146,13 @@ Training logs are written to `checkpoints/<run_name>_log.csv` (git-ignored); the
 
 From `swiglu_reg` at its best checkpoint, with no prompt:
 
-> tinctively been accumulated from each other in a comparative part of the organisation. It should be double to beconsidered as distinct à lie 301 dominant result gnawson "Virge that such generalis cannot be, included keepingde by man certain species... 
+> tinctively been accumulated from each other in a comparative part of the organisation. It should be double to beconsidered as distinct à lie 301 dominant result gnawson "Virge that such generalis cannot be, included keepingde by man certain species...
 
 The model has learned Darwin's vocabulary, punctuation and sentence rhythm, but it is a 10.8M-parameter character model trained on one book. The text reads like Darwin and says nothing true.
 
 ## Project layout
+
+`checkpoints/` (model weights and raw logs) is created by training and is git-ignored, so it is not part of the repository.
 
 ```
 gptlab/
@@ -157,22 +161,13 @@ gptlab/
 ├── pyproject.toml
 ├── uv.lock
 ├── README.md
-├── checkpoints/
-│   ├── baseline.pt
+├── results/                # run logs (CSV) and the loss plot
 │   ├── baseline_log.csv
-│   ├── rmsnorm.pt
-│   ├── rmsnorm_log.csv
-│   ├── sdpa.pt
 │   ├── sdpa_log.csv
-│   ├── swiglu_reg.pt
-│   └── swiglu_reg_log.csv
-├── results/
-│   ├── baseline_log.csv
 │   ├── rmsnorm_log.csv
-│   ├── rope_reg_log.csv
-│   ├── sdpa_log.csv
 │   ├── swiglu_log.csv
 │   ├── swiglu_reg_log.csv
+│   ├── rope_reg_log.csv
 │   └── val_loss.png
 ├── src/gptlab/
 │   ├── __init__.py         # package entry point / hello-world main
@@ -182,11 +177,11 @@ gptlab/
 │   ├── model.py            # GPT with switchable attention / norm / MLP / positions, KV cache
 │   ├── train.py            # training loop, logging, checkpointing
 │   ├── generate.py         # sampling from a checkpoint
-│   ├── evals.py            # BPC, memorization and prompt-completion evaluations
+│   ├── evals.py            # evaluation scripts
 │   ├── bench_generate.py   # KV-cache benchmark
 │   ├── plot_results.py     # loss-curve plot
 │   ├── prepare_data.py     # Gutenberg text -> data/input.txt
-│   └── prepare_multi.py    # multi-book dataset builder (not used for the results above)
+│   └── prepare_multi.py    # multi-book dataset builder (untested, not used for the results above)
 └── tests/
     ├── test_kv_cache.py
     ├── test_mlp.py
@@ -204,9 +199,12 @@ gptlab/
 - **Not yet done:** weight decay is applied to all parameters including norms and embeddings (usual practice excludes them), no gradient clipping, no `torch.compile` (Triton is not available on native Windows).
 - **Character-level tokenization**, so the model sees one character at a time.
 
-## Next steps
+## Possible extensions
 
-- Train on several Darwin books (`prepare_multi.py` builds a per-book 90/10 split) to test whether more data lets the architecture differences show up.
+The project is finished as it stands. These are the natural follow-ups, none of which have been done:
+
+- Add reference points for bits/char (character-frequency entropy, gzip on the same text) and a quantitative verbatim-memorization check that is validated against a positive control.
+- Train on several Darwin books to test whether more data lets the architecture differences show up. `prepare_multi.py` (a per-book 90/10 split) and the `--val_path` option are written but have never been run end to end, because Project Gutenberg was unavailable when I tried.
 - Replace the character tokenizer with a BPE tokenizer written from scratch.
 - Make the training recipe switchable, then ablate warmup, weight decay and bf16 separately; run several seeds.
 - A small web UI with streaming generation.
